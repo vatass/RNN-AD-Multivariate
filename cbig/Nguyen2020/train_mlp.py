@@ -2,12 +2,25 @@
 """5-fold cross-validation training of an MLP for 145-ROI regression.
 
 Data format (subjectsamples_longclean_dl_muse_allstudies.csv):
-    PTID  : subject identifier (multiple rows per subject)
+    PTID  : subject identifier matching the RID used in the TADPOLE pkl files
     X     : 151-dimensional embedding stored as a Python list literal
     Y     : 145-dimensional ROI target stored as a Python list literal
 
-Folds are assigned at the SUBJECT level so that all observations
-from the same subject end up in the same fold, preventing leakage.
+Train/test splits are taken from the pre-generated pkl files produced by
+gen_cv_pickle.py.  Each pkl contains a 'train' and 'test' dataloader whose
+.subjects attribute lists the RIDs belonging to that split.  The MLP uses
+those same RIDs to select rows from the CSV so results are directly
+comparable to the RNN-AD experiments.
+
+Usage example (5 folds, pkl files named fold0.pkl … fold4.pkl):
+
+    python -m cbig.Nguyen2020.train_mlp \
+        --data  subjectsamples_longclean_dl_muse_allstudies.csv \
+        --pkl_dir output/ \
+        --pkl_pattern "fold{fold}.pkl" \
+        --n_folds 5 \
+        --out_dir output/mlp_cv \
+        --epochs 100 --verbose
 """
 from __future__ import print_function, division
 
@@ -16,6 +29,7 @@ import ast
 import csv
 import json
 import os
+import pickle
 import time
 
 import numpy as np
@@ -31,14 +45,51 @@ from cbig.Nguyen2020.mlp_model import MLPRegressor
 # ---------------------------------------------------------------------------
 
 def load_csv(path):
-    """Return arrays X [N, 151], Y [N, 145] and subject id per row."""
-    xs, ys, ptids = [], [], []
+    """Load CSV and return dicts keyed by PTID.
+
+    Returns:
+        xs  : dict {ptid -> list[float]}  (151-dim)
+        ys  : dict {ptid -> list[list[float]]}  one entry per timepoint
+              (multiple rows per subject are collected as a list)
+    """
+    xs, ys = {}, {}
     with open(path) as fh:
         for row in csv.DictReader(fh):
-            xs.append(ast.literal_eval(row['X']))
-            ys.append(ast.literal_eval(row['Y']))
-            ptids.append(row['PTID'])
-    return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32), np.array(ptids)
+            pid = str(row['PTID'])
+            x   = ast.literal_eval(row['X'])
+            y   = ast.literal_eval(row['Y'])
+            if pid not in xs:
+                xs[pid] = []
+                ys[pid] = []
+            xs[pid].append(x)
+            ys[pid].append(y)
+    return xs, ys
+
+
+def subjects_to_arrays(subject_ids, xs, ys):
+    """Flatten all timepoints for the given subjects into (X, Y) arrays."""
+    X_rows, Y_rows = [], []
+    for sid in subject_ids:
+        key = str(sid)
+        if key not in xs:
+            continue
+        X_rows.extend(xs[key])
+        Y_rows.extend(ys[key])
+    return (np.array(X_rows, dtype=np.float32),
+            np.array(Y_rows, dtype=np.float32))
+
+
+# ---------------------------------------------------------------------------
+# Load subject lists from a pkl file
+# ---------------------------------------------------------------------------
+
+def load_subjects_from_pkl(pkl_path):
+    """Return (train_subjects, test_subjects) from a gen_cv_pickle pkl file."""
+    with open(pkl_path, 'rb') as fh:
+        data = pickle.load(fh)
+    train_subj = list(data['train'].subjects)
+    test_subj  = list(data['test'].subjects)
+    return train_subj, test_subj
 
 
 # ---------------------------------------------------------------------------
@@ -48,36 +99,12 @@ def load_csv(path):
 def compute_stats(X):
     mean = X.mean(axis=0)
     std  = X.std(axis=0)
-    std[std == 0] = 1.0          # avoid division by zero for constant features
+    std[std == 0] = 1.0
     return mean, std
 
 
 def normalise(X, mean, std):
     return (X - mean) / std
-
-
-# ---------------------------------------------------------------------------
-# 5-fold subject-level split
-# ---------------------------------------------------------------------------
-
-def make_subject_folds(ptids, n_folds=5, seed=42):
-    """
-    Assign each subject to one of n_folds folds.
-
-    Returns a list of length n_folds; each element is a boolean mask
-    over *rows* (not subjects) indicating the test set for that fold.
-    """
-    rng = np.random.RandomState(seed)
-    unique_subjects = np.unique(ptids)
-    rng.shuffle(unique_subjects)
-
-    subject_fold = {s: i % n_folds for i, s in enumerate(unique_subjects)}
-    row_fold = np.array([subject_fold[p] for p in ptids])
-
-    test_masks = []
-    for f in range(n_folds):
-        test_masks.append(row_fold == f)
-    return test_masks
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +125,7 @@ def train_epoch(model, loader, optimizer, criterion, device):
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         optimizer.zero_grad()
-        pred = model(xb)
-        loss = criterion(pred, yb)
+        loss = criterion(model(xb), yb)
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * xb.size(0)
@@ -108,8 +134,7 @@ def train_epoch(model, loader, optimizer, criterion, device):
 
 def eval_epoch(model, loader, criterion, device):
     model.eval()
-    total_loss = 0.0
-    total_mae  = 0.0
+    total_loss = total_mae = 0.0
     with torch.no_grad():
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
@@ -125,7 +150,6 @@ def eval_epoch(model, loader, criterion, device):
 # ---------------------------------------------------------------------------
 
 def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
-    """Train one fold, return best test MAE and per-epoch history."""
     loader_tr = build_loader(X_train, Y_train, args.batch_size, shuffle=True)
     loader_te = build_loader(X_test,  Y_test,  args.batch_size, shuffle=False)
 
@@ -149,8 +173,8 @@ def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
 
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
-        tr_loss          = train_epoch(model, loader_tr, optimizer, criterion, device)
-        te_loss, te_mae  = eval_epoch(model, loader_te, criterion, device)
+        tr_loss         = train_epoch(model, loader_tr, optimizer, criterion, device)
+        te_loss, te_mae = eval_epoch(model, loader_te, criterion, device)
         scheduler.step(te_loss)
 
         history.append({'epoch': epoch, 'train_loss': tr_loss,
@@ -161,11 +185,10 @@ def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
             torch.save(model, best_path)
 
         if args.verbose and epoch % 10 == 0:
-            elapsed = time.time() - t0
             print('  fold %d  epoch %3d/%d  [%.0fs]  '
                   'train_loss=%.4f  test_loss=%.4f  test_mae=%.4f'
-                  % (fold_idx, epoch, args.epochs, elapsed,
-                     tr_loss, te_loss, te_mae))
+                  % (fold_idx, epoch, args.epochs,
+                     time.time() - t0, tr_loss, te_loss, te_mae))
 
     return best_mae, history
 
@@ -182,34 +205,47 @@ def train(args):
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    # ---- load raw data ----
-    print('Loading data from', args.data)
-    X, Y, ptids = load_csv(args.data)
-    print('  X shape:', X.shape, '  Y shape:', Y.shape,
-          '  unique subjects:', len(np.unique(ptids)))
-
-    # ---- 5-fold split masks (subject level) ----
-    test_masks = make_subject_folds(ptids, n_folds=args.n_folds, seed=args.seed)
+    print('Loading CSV data from', args.data)
+    xs, ys = load_csv(args.data)
+    print('  Unique subjects in CSV:', len(xs))
 
     all_results = []
-    for fold_idx, test_mask in enumerate(test_masks):
-        train_mask = ~test_mask
+    for fold_idx in range(args.n_folds):
+        pkl_name = args.pkl_pattern.format(fold=fold_idx)
+        pkl_path = os.path.join(args.pkl_dir, pkl_name)
 
-        X_tr_raw, Y_tr = X[train_mask], Y[train_mask]
-        X_te_raw, Y_te = X[test_mask],  Y[test_mask]
+        if not os.path.exists(pkl_path):
+            raise FileNotFoundError(
+                'pkl file not found: %s\n'
+                'Generate it first with gen_cv_pickle.py' % pkl_path)
+
+        train_subj, test_subj = load_subjects_from_pkl(pkl_path)
+
+        X_tr_raw, Y_tr = subjects_to_arrays(train_subj, xs, ys)
+        X_te_raw, Y_te = subjects_to_arrays(test_subj,  xs, ys)
+
+        if X_tr_raw.shape[0] == 0:
+            raise RuntimeError(
+                'Fold %d: no training rows found. '
+                'Check that PTID in the CSV matches RID in the pkl.' % fold_idx)
+        if X_te_raw.shape[0] == 0:
+            raise RuntimeError(
+                'Fold %d: no test rows found. '
+                'Check that PTID in the CSV matches RID in the pkl.' % fold_idx)
 
         # normalise inputs using training-set statistics only
-        mean, std   = compute_stats(X_tr_raw)
-        X_tr        = normalise(X_tr_raw, mean, std)
-        X_te        = normalise(X_te_raw, mean, std)
+        mean, std = compute_stats(X_tr_raw)
+        X_tr      = normalise(X_tr_raw, mean, std)
+        X_te      = normalise(X_te_raw, mean, std)
 
-        print('\n=== Fold %d/%d  train=%d  test=%d ==='
-              % (fold_idx, args.n_folds - 1, X_tr.shape[0], X_te.shape[0]))
+        print('\n=== Fold %d/%d  (pkl: %s)  train=%d  test=%d ==='
+              % (fold_idx, args.n_folds - 1, pkl_name,
+                 X_tr.shape[0], X_te.shape[0]))
 
         best_mae, history = train_fold(
             fold_idx, X_tr, Y_tr, X_te, Y_te, args, device)
 
-        # save per-fold stats
+        # save normalisation stats for inference
         stats_path = os.path.join(args.out_dir, 'fold%d_stats.json' % fold_idx)
         with open(stats_path, 'w') as fh:
             json.dump({'mean': mean.tolist(), 'std': std.tolist()}, fh)
@@ -222,10 +258,9 @@ def train(args):
         all_results.append({'fold': fold_idx, 'best_test_mae': best_mae})
         print('  Fold %d best test MAE: %.4f' % (fold_idx, best_mae))
 
-    # ---- summary ----
     maes = [r['best_test_mae'] for r in all_results]
     summary = {
-        'folds': all_results,
+        'folds':    all_results,
         'mean_mae': float(np.mean(maes)),
         'std_mae':  float(np.std(maes)),
     }
@@ -233,31 +268,39 @@ def train(args):
     with open(summary_path, 'w') as fh:
         json.dump(summary, fh, indent=2)
 
-    print('\n=== 5-fold CV summary ===')
+    print('\n=== %d-fold CV summary ===' % args.n_folds)
     print('  Mean MAE: %.4f  Std: %.4f' % (summary['mean_mae'], summary['std_mae']))
     print('  Results saved to', args.out_dir)
 
 
 def get_args():
     parser = argparse.ArgumentParser(
-        description='5-fold CV MLP training for 145-ROI regression')
+        description='5-fold CV MLP training for 145-ROI regression '
+                    'using pre-defined pkl train/test splits')
 
     parser.add_argument('--data', required=True,
                         help='Path to subjectsamples_longclean_dl_muse_allstudies.csv')
+    parser.add_argument('--pkl_dir', required=True,
+                        help='Directory containing the fold pkl files '
+                             '(produced by gen_cv_pickle.py)')
+    parser.add_argument('--pkl_pattern', default='fold{fold}.pkl',
+                        help='Filename pattern for pkl files, '
+                             '{fold} is replaced by the fold index '
+                             '(default: fold{fold}.pkl)')
     parser.add_argument('--out_dir', '-o', required=True,
                         help='Directory for checkpoints and logs')
 
-    parser.add_argument('--n_folds', type=int, default=5)
-    parser.add_argument('--epochs',  type=int, default=100)
-    parser.add_argument('--batch_size', type=int, default=256)
-    parser.add_argument('--lr',       type=float, default=1e-3)
+    parser.add_argument('--n_folds',    type=int,   default=5)
+    parser.add_argument('--epochs',     type=int,   default=100)
+    parser.add_argument('--batch_size', type=int,   default=256)
+    parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--dropout',  type=float, default=0.2)
+    parser.add_argument('--dropout',    type=float, default=0.2)
     parser.add_argument('--hidden_sizes', type=str, default='512,256',
-                        help='Comma-separated list of hidden layer widths')
+                        help='Comma-separated hidden layer widths')
     parser.add_argument('--loss', choices=['mse', 'mae'], default='mse',
-                        help='Regression loss: mse (MSE) or mae (L1)')
-    parser.add_argument('--seed', type=int, default=42)
+                        help='Regression loss: mse or mae (L1)')
+    parser.add_argument('--seed',    type=int, default=42)
     parser.add_argument('--verbose', action='store_true')
 
     return parser.parse_args()
