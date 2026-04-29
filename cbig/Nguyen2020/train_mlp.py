@@ -2,25 +2,24 @@
 """5-fold cross-validation training of an MLP for 145-ROI regression.
 
 Data format (subjectsamples_longclean_dl_muse_allstudies.csv):
-    PTID  : subject identifier matching the RID used in the TADPOLE pkl files
+    PTID  : subject identifier
     X     : 151-dimensional embedding stored as a Python list literal
     Y     : 145-dimensional ROI target stored as a Python list literal
 
-Train/test splits are taken from the pre-generated pkl files produced by
-gen_cv_pickle.py.  Each pkl contains a 'train' and 'test' dataloader whose
-.subjects attribute lists the RIDs belonging to that split.  The MLP uses
-those same RIDs to select rows from the CSV so results are directly
-comparable to the RNN-AD experiments.
+Train/test splits are taken from the pre-defined pkl files:
+    train_subject_allstudies_ids_dl_hmuse{fold}.pkl
+    test_subject_allstudies_ids_dl_hmuse{fold}.pkl
 
-Usage example (5 folds, pkl files named fold0.pkl … fold4.pkl):
+Each pkl file is a plain Python list of subject IDs.  All visits (rows)
+belonging to a subject are placed in the same split to prevent leakage.
 
-    python -m cbig.Nguyen2020.train_mlp \
-        --data  subjectsamples_longclean_dl_muse_allstudies.csv \
-        --pkl_dir output/ \
-        --pkl_pattern "fold{fold}.pkl" \
-        --n_folds 5 \
-        --out_dir output/mlp_cv \
-        --epochs 100 --verbose
+Usage
+-----
+python -m cbig.Nguyen2020.train_mlp \\
+    --data  subjectsamples_longclean_dl_muse_allstudies.csv \\
+    --fold_dir . \\
+    --out_dir output/mlp_cv \\
+    --epochs 100 --verbose
 """
 from __future__ import print_function, division
 
@@ -31,6 +30,7 @@ import json
 import os
 import pickle
 import time
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -45,29 +45,18 @@ from cbig.Nguyen2020.mlp_model import MLPRegressor
 # ---------------------------------------------------------------------------
 
 def load_csv(path):
-    """Load CSV and return dicts keyed by PTID.
-
-    Returns:
-        xs  : dict {ptid -> list[float]}  (151-dim)
-        ys  : dict {ptid -> list[list[float]]}  one entry per timepoint
-              (multiple rows per subject are collected as a list)
-    """
-    xs, ys = {}, {}
+    """Return per-subject dicts: {ptid -> list of X vectors}, {ptid -> list of Y vectors}."""
+    xs, ys = defaultdict(list), defaultdict(list)
     with open(path) as fh:
         for row in csv.DictReader(fh):
             pid = str(row['PTID'])
-            x   = ast.literal_eval(row['X'])
-            y   = ast.literal_eval(row['Y'])
-            if pid not in xs:
-                xs[pid] = []
-                ys[pid] = []
-            xs[pid].append(x)
-            ys[pid].append(y)
+            xs[pid].append(ast.literal_eval(row['X']))
+            ys[pid].append(ast.literal_eval(row['Y']))
     return xs, ys
 
 
 def subjects_to_arrays(subject_ids, xs, ys):
-    """Flatten all timepoints for the given subjects into (X, Y) arrays."""
+    """Flatten all visits for the given subject IDs into (X, Y) numpy arrays."""
     X_rows, Y_rows = [], []
     for sid in subject_ids:
         key = str(sid)
@@ -79,21 +68,29 @@ def subjects_to_arrays(subject_ids, xs, ys):
             np.array(Y_rows, dtype=np.float32))
 
 
-# ---------------------------------------------------------------------------
-# Load subject lists from a pkl file
-# ---------------------------------------------------------------------------
+def load_fold_ids(fold_dir, fold):
+    """Load train and test subject ID lists for the given fold index."""
+    train_pkl = os.path.join(
+        fold_dir, 'train_subject_allstudies_ids_dl_hmuse%d.pkl' % fold)
+    test_pkl = os.path.join(
+        fold_dir, 'test_subject_allstudies_ids_dl_hmuse%d.pkl' % fold)
 
-def load_subjects_from_pkl(pkl_path):
-    """Return (train_subjects, test_subjects) from a gen_cv_pickle pkl file."""
-    with open(pkl_path, 'rb') as fh:
-        data = pickle.load(fh)
-    train_subj = list(data['train'].subjects)
-    test_subj  = list(data['test'].subjects)
-    return train_subj, test_subj
+    for p in (train_pkl, test_pkl):
+        if not os.path.exists(p):
+            raise FileNotFoundError(
+                'Fold pkl not found: %s\n'
+                'Expected files: train/test_subject_allstudies_ids_dl_hmuse{fold}.pkl' % p)
+
+    with open(train_pkl, 'rb') as fh:
+        train_ids = pickle.load(fh)
+    with open(test_pkl, 'rb') as fh:
+        test_ids = pickle.load(fh)
+
+    return train_ids, test_ids
 
 
 # ---------------------------------------------------------------------------
-# Normalisation helpers
+# Normalisation
 # ---------------------------------------------------------------------------
 
 def compute_stats(X):
@@ -112,9 +109,7 @@ def normalise(X, mean, std):
 # ---------------------------------------------------------------------------
 
 def build_loader(X, Y, batch_size, shuffle):
-    tx = torch.from_numpy(X)
-    ty = torch.from_numpy(Y)
-    ds = TensorDataset(tx, ty)
+    ds = TensorDataset(torch.from_numpy(X), torch.from_numpy(Y))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
                       pin_memory=True, num_workers=0)
 
@@ -211,41 +206,35 @@ def train(args):
 
     all_results = []
     for fold_idx in range(args.n_folds):
-        pkl_name = args.pkl_pattern.format(fold=fold_idx)
-        pkl_path = os.path.join(args.pkl_dir, pkl_name)
+        train_ids, test_ids = load_fold_ids(args.fold_dir, fold_idx)
 
-        if not os.path.exists(pkl_path):
-            raise FileNotFoundError(
-                'pkl file not found: %s\n'
-                'Generate it first with gen_cv_pickle.py' % pkl_path)
-
-        train_subj, test_subj = load_subjects_from_pkl(pkl_path)
-
-        X_tr_raw, Y_tr = subjects_to_arrays(train_subj, xs, ys)
-        X_te_raw, Y_te = subjects_to_arrays(test_subj,  xs, ys)
+        X_tr_raw, Y_tr = subjects_to_arrays(train_ids, xs, ys)
+        X_te_raw, Y_te = subjects_to_arrays(test_ids,  xs, ys)
 
         if X_tr_raw.shape[0] == 0:
             raise RuntimeError(
-                'Fold %d: no training rows found. '
-                'Check that PTID in the CSV matches RID in the pkl.' % fold_idx)
+                'Fold %d: no training rows matched. '
+                'Ensure PTID in the CSV matches the subject IDs in the pkl.' % fold_idx)
         if X_te_raw.shape[0] == 0:
             raise RuntimeError(
-                'Fold %d: no test rows found. '
-                'Check that PTID in the CSV matches RID in the pkl.' % fold_idx)
+                'Fold %d: no test rows matched. '
+                'Ensure PTID in the CSV matches the subject IDs in the pkl.' % fold_idx)
 
-        # normalise inputs using training-set statistics only
+        # Normalise inputs using training-set statistics only
         mean, std = compute_stats(X_tr_raw)
         X_tr      = normalise(X_tr_raw, mean, std)
         X_te      = normalise(X_te_raw, mean, std)
 
-        print('\n=== Fold %d/%d  (pkl: %s)  train=%d  test=%d ==='
-              % (fold_idx, args.n_folds - 1, pkl_name,
-                 X_tr.shape[0], X_te.shape[0]))
+        print('\n=== Fold %d/%d  train=%d visits (%d subjects)  '
+              'test=%d visits (%d subjects) ==='
+              % (fold_idx, args.n_folds - 1,
+                 X_tr.shape[0], len(train_ids),
+                 X_te.shape[0], len(test_ids)))
 
         best_mae, history = train_fold(
             fold_idx, X_tr, Y_tr, X_te, Y_te, args, device)
 
-        # save normalisation stats for inference
+        # Save normalisation stats for inference
         stats_path = os.path.join(args.out_dir, 'fold%d_stats.json' % fold_idx)
         with open(stats_path, 'w') as fh:
             json.dump({'mean': mean.tolist(), 'std': std.tolist()}, fh)
@@ -264,8 +253,7 @@ def train(args):
         'mean_mae': float(np.mean(maes)),
         'std_mae':  float(np.std(maes)),
     }
-    summary_path = os.path.join(args.out_dir, 'cv_summary.json')
-    with open(summary_path, 'w') as fh:
+    with open(os.path.join(args.out_dir, 'cv_summary.json'), 'w') as fh:
         json.dump(summary, fh, indent=2)
 
     print('\n=== %d-fold CV summary ===' % args.n_folds)
@@ -276,17 +264,14 @@ def train(args):
 def get_args():
     parser = argparse.ArgumentParser(
         description='5-fold CV MLP training for 145-ROI regression '
-                    'using pre-defined pkl train/test splits')
+                    'using pre-defined train/test subject splits')
 
     parser.add_argument('--data', required=True,
                         help='Path to subjectsamples_longclean_dl_muse_allstudies.csv')
-    parser.add_argument('--pkl_dir', required=True,
-                        help='Directory containing the fold pkl files '
-                             '(produced by gen_cv_pickle.py)')
-    parser.add_argument('--pkl_pattern', default='fold{fold}.pkl',
-                        help='Filename pattern for pkl files, '
-                             '{fold} is replaced by the fold index '
-                             '(default: fold{fold}.pkl)')
+    parser.add_argument('--fold_dir', default='.',
+                        help='Directory containing '
+                             'train/test_subject_allstudies_ids_dl_hmuse{fold}.pkl '
+                             '(default: current directory)')
     parser.add_argument('--out_dir', '-o', required=True,
                         help='Directory for checkpoints and logs')
 
@@ -297,9 +282,9 @@ def get_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--dropout',    type=float, default=0.2)
     parser.add_argument('--hidden_sizes', type=str, default='512,256',
-                        help='Comma-separated hidden layer widths')
+                        help='Comma-separated hidden layer widths (default: 512,256)')
     parser.add_argument('--loss', choices=['mse', 'mae'], default='mse',
-                        help='Regression loss: mse or mae (L1)')
+                        help='Regression loss function (default: mse)')
     parser.add_argument('--seed',    type=int, default=42)
     parser.add_argument('--verbose', action='store_true')
 
