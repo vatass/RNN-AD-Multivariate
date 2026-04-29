@@ -132,7 +132,8 @@ def compute_per_timepoint_metrics(preds_by_subj, trues_by_subj):
 # Single-fold training + evaluation
 # ---------------------------------------------------------------------------
 
-def run_fold(fold, train_subjects, test_subjects, output_dir, args, device):
+def run_fold(fold, train_subjects, test_subjects, test_ids_present,
+             output_dir, args, device):
     os.makedirs(output_dir, exist_ok=True)
 
     # Normalize time using training set max
@@ -223,6 +224,8 @@ def run_fold(fold, train_subjects, test_subjects, output_dir, args, device):
 
     preds_by_subj, trues_by_subj = [], []
     all_pred_flat, all_true_flat = [], []
+    all_ptids_flat = []   # per-visit PTID, parallel to all_pred_flat rows
+    subj_counter = 0
 
     with torch.no_grad():
         for X, Y, lengths in test_loader:
@@ -232,10 +235,13 @@ def run_fold(fold, train_subjects, test_subjects, output_dir, args, device):
                 l = l.item()
                 p = pred[i, :l].cpu().numpy()
                 t = Y[i, :l].cpu().numpy()
+                ptid = str(test_ids_present[subj_counter])
                 preds_by_subj.append(p)
                 trues_by_subj.append(t)
                 all_pred_flat.append(p)
                 all_true_flat.append(t)
+                all_ptids_flat.extend([ptid] * l)
+                subj_counter += 1
 
     all_pred = np.concatenate(all_pred_flat, axis=0)   # (N_visits, 145)
     all_true = np.concatenate(all_true_flat, axis=0)
@@ -251,6 +257,8 @@ def run_fold(fold, train_subjects, test_subjects, output_dir, args, device):
     # Save arrays
     np.save(os.path.join(output_dir, 'test_predictions.npy'), all_pred)
     np.save(os.path.join(output_dir, 'test_targets.npy'), all_true)
+    with open(os.path.join(output_dir, 'test_ptids.json'), 'w') as fh:
+        json.dump(all_ptids_flat, fh)
     np.save(os.path.join(output_dir, 'per_timepoint_mae.npy'), mae_per_tp)
     np.save(os.path.join(output_dir, 'per_timepoint_mse.npy'), mse_per_tp)
     np.save(os.path.join(output_dir, 'per_region_mae.npy'), per_region_mae)
@@ -362,7 +370,9 @@ def main():
             test_ids = pickle.load(fh)
 
         train_subjects = filter_subjects(all_subjects, train_ids)
-        test_subjects  = filter_subjects(all_subjects, test_ids)
+        # keep only IDs that actually have data (same filter as filter_subjects)
+        test_ids_present = [sid for sid in test_ids if str(sid) in all_subjects]
+        test_subjects    = [all_subjects[str(sid)] for sid in test_ids_present]
 
         fold_dir = os.path.join(args.output_dir, f'fold_{fold}')
 
@@ -372,7 +382,7 @@ def main():
             json.dump({'train': [str(i) for i in train_ids],
                        'test':  [str(i) for i in test_ids]}, fh, indent=2)
 
-        metrics = run_fold(fold, train_subjects, test_subjects,
+        metrics = run_fold(fold, train_subjects, test_subjects, test_ids_present,
                            fold_dir, args, device)
         all_metrics.append(metrics)
 

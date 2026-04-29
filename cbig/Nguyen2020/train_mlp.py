@@ -13,6 +13,14 @@ Train/test splits are taken from the pre-defined pkl files:
 Each pkl file is a plain Python list of subject IDs.  All visits (rows)
 belonging to a subject are placed in the same split to prevent leakage.
 
+Per-fold outputs (written to out_dir/fold_{i}/):
+    best_model.pt          — best model checkpoint (lowest test MAE)
+    test_predictions.npy   — predicted ROIs (N_visits, 145)
+    test_targets.npy       — ground-truth ROIs (N_visits, 145)
+    test_ptids.json        — PTID for every visit row in the arrays above
+    stats.json             — input normalisation mean/std
+    history.json           — per-epoch training metrics
+
 Usage
 -----
 python -m cbig.Nguyen2020.train_mlp \\
@@ -56,16 +64,25 @@ def load_csv(path):
 
 
 def subjects_to_arrays(subject_ids, xs, ys):
-    """Flatten all visits for the given subject IDs into (X, Y) numpy arrays."""
-    X_rows, Y_rows = [], []
+    """Flatten all visits for the given subject IDs.
+
+    Returns:
+        X      : (N_visits, 151) float32 array
+        Y      : (N_visits, 145) float32 array
+        ptids  : list of length N_visits — PTID for each visit row
+    """
+    X_rows, Y_rows, ptid_rows = [], [], []
     for sid in subject_ids:
         key = str(sid)
         if key not in xs:
             continue
-        X_rows.extend(xs[key])
-        Y_rows.extend(ys[key])
+        for x, y in zip(xs[key], ys[key]):
+            X_rows.append(x)
+            Y_rows.append(y)
+            ptid_rows.append(key)
     return (np.array(X_rows, dtype=np.float32),
-            np.array(Y_rows, dtype=np.float32))
+            np.array(Y_rows, dtype=np.float32),
+            ptid_rows)
 
 
 def load_fold_ids(fold_dir, fold):
@@ -140,11 +157,26 @@ def eval_epoch(model, loader, criterion, device):
     return total_loss / n, total_mae / n
 
 
+def predict_all(model, X, batch_size, device):
+    """Run the model over X in batches; return (N, 145) numpy array."""
+    model.eval()
+    preds = []
+    loader = DataLoader(TensorDataset(torch.from_numpy(X)),
+                        batch_size=batch_size, shuffle=False)
+    with torch.no_grad():
+        for (xb,) in loader:
+            preds.append(model(xb.to(device)).cpu().numpy())
+    return np.concatenate(preds, axis=0)
+
+
 # ---------------------------------------------------------------------------
 # Per-fold training
 # ---------------------------------------------------------------------------
 
-def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
+def train_fold(fold_idx, X_train, Y_train, X_test, Y_test,
+               test_ptids, args, device, fold_dir):
+    os.makedirs(fold_dir, exist_ok=True)
+
     loader_tr = build_loader(X_train, Y_train, args.batch_size, shuffle=True)
     loader_te = build_loader(X_test,  Y_test,  args.batch_size, shuffle=False)
 
@@ -163,7 +195,7 @@ def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
         optimizer, patience=10, factor=0.5, verbose=False)
 
     best_mae  = float('inf')
-    best_path = os.path.join(args.out_dir, 'fold%d_best.pt' % fold_idx)
+    best_path = os.path.join(fold_dir, 'best_model.pt')
     history   = []
 
     t0 = time.time()
@@ -177,7 +209,7 @@ def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
 
         if te_mae < best_mae:
             best_mae = te_mae
-            torch.save(model, best_path)
+            torch.save(model.state_dict(), best_path)
 
         if args.verbose and epoch % 10 == 0:
             print('  fold %d  epoch %3d/%d  [%.0fs]  '
@@ -185,7 +217,18 @@ def train_fold(fold_idx, X_train, Y_train, X_test, Y_test, args, device):
                   % (fold_idx, epoch, args.epochs,
                      time.time() - t0, tr_loss, te_loss, te_mae))
 
-    return best_mae, history
+    # ---- reload best checkpoint and save predictions ----
+    model.load_state_dict(torch.load(best_path, map_location=device))
+    test_preds = predict_all(model, X_test, args.batch_size, device)
+
+    np.save(os.path.join(fold_dir, 'test_predictions.npy'), test_preds)
+    np.save(os.path.join(fold_dir, 'test_targets.npy'),     Y_test)
+    with open(os.path.join(fold_dir, 'test_ptids.json'), 'w') as fh:
+        json.dump(test_ptids, fh)
+    with open(os.path.join(fold_dir, 'history.json'), 'w') as fh:
+        json.dump(history, fh)
+
+    return best_mae
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +251,8 @@ def train(args):
     for fold_idx in range(args.n_folds):
         train_ids, test_ids = load_fold_ids(args.fold_dir, fold_idx)
 
-        X_tr_raw, Y_tr = subjects_to_arrays(train_ids, xs, ys)
-        X_te_raw, Y_te = subjects_to_arrays(test_ids,  xs, ys)
+        X_tr_raw, Y_tr, _         = subjects_to_arrays(train_ids, xs, ys)
+        X_te_raw, Y_te, test_ptids = subjects_to_arrays(test_ids,  xs, ys)
 
         if X_tr_raw.shape[0] == 0:
             raise RuntimeError(
@@ -225,24 +268,21 @@ def train(args):
         X_tr      = normalise(X_tr_raw, mean, std)
         X_te      = normalise(X_te_raw, mean, std)
 
+        fold_dir = os.path.join(args.out_dir, 'fold_%d' % fold_idx)
+
         print('\n=== Fold %d/%d  train=%d visits (%d subjects)  '
               'test=%d visits (%d subjects) ==='
               % (fold_idx, args.n_folds - 1,
                  X_tr.shape[0], len(train_ids),
                  X_te.shape[0], len(test_ids)))
 
-        best_mae, history = train_fold(
-            fold_idx, X_tr, Y_tr, X_te, Y_te, args, device)
+        best_mae = train_fold(
+            fold_idx, X_tr, Y_tr, X_te, Y_te,
+            test_ptids, args, device, fold_dir)
 
         # Save normalisation stats for inference
-        stats_path = os.path.join(args.out_dir, 'fold%d_stats.json' % fold_idx)
-        with open(stats_path, 'w') as fh:
+        with open(os.path.join(fold_dir, 'stats.json'), 'w') as fh:
             json.dump({'mean': mean.tolist(), 'std': std.tolist()}, fh)
-
-        history_path = os.path.join(
-            args.out_dir, 'fold%d_history.json' % fold_idx)
-        with open(history_path, 'w') as fh:
-            json.dump(history, fh)
 
         all_results.append({'fold': fold_idx, 'best_test_mae': best_mae})
         print('  Fold %d best test MAE: %.4f' % (fold_idx, best_mae))
@@ -273,7 +313,7 @@ def get_args():
                              'train/test_subject_allstudies_ids_dl_hmuse{fold}.pkl '
                              '(default: current directory)')
     parser.add_argument('--out_dir', '-o', required=True,
-                        help='Directory for checkpoints and logs')
+                        help='Root directory for per-fold outputs')
 
     parser.add_argument('--n_folds',    type=int,   default=5)
     parser.add_argument('--epochs',     type=int,   default=100)
