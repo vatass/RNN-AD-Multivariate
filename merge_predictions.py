@@ -23,10 +23,9 @@ Output CSV columns
 ------------------
     PTID
     visit_idx          — 0-based visit index within subject
-    ROI_1_rnn_pred, ROI_1_mlp_pred, ROI_1_real
-    ROI_2_rnn_pred, ROI_2_mlp_pred, ROI_2_real
-    ...
-    ROI_145_rnn_pred, ROI_145_mlp_pred, ROI_145_real
+    model              — 'RNN' or 'MLP'
+    ROI_1_pred … ROI_145_pred   — predicted volumes for this model
+    ROI_1_real … ROI_145_real   — ground-truth volumes (same for both rows)
 
 Usage
 -----
@@ -146,14 +145,9 @@ def verify_coverage(rnn_subj, mlp_subj):
 # ---------------------------------------------------------------------------
 
 def build_csv(rnn_subj, mlp_subj, common_subjects, n_rois, out_path):
-    # Build column names
-    roi_cols = []
-    for r in range(1, n_rois + 1):
-        roi_cols += ['ROI_%d_rnn_pred' % r,
-                     'ROI_%d_mlp_pred' % r,
-                     'ROI_%d_real'     % r]
-
-    header = ['PTID', 'visit_idx'] + roi_cols
+    pred_cols = ['ROI_%d_pred' % r for r in range(1, n_rois + 1)]
+    real_cols = ['ROI_%d_real' % r for r in range(1, n_rois + 1)]
+    header = ['PTID', 'visit_idx', 'model'] + pred_cols + real_cols
 
     n_rows = 0
     with open(out_path, 'w') as fh:
@@ -163,7 +157,6 @@ def build_csv(rnn_subj, mlp_subj, common_subjects, n_rois, out_path):
             rnn_preds = rnn_subj[ptid]['pred']
             mlp_preds = mlp_subj[ptid]['pred']
             rnn_trues = rnn_subj[ptid]['true']
-            mlp_trues = mlp_subj[ptid]['true']
 
             n_visits = len(rnn_preds)
             if len(mlp_preds) != n_visits:
@@ -173,19 +166,14 @@ def build_csv(rnn_subj, mlp_subj, common_subjects, n_rois, out_path):
                 n_visits = min(n_visits, len(mlp_preds))
 
             for v in range(n_visits):
-                rp = rnn_preds[v]
-                mp = mlp_preds[v]
-                # use RNN ground truth (both models train on same targets)
                 gt = rnn_trues[v]
+                real_vals = ['%.6f' % gt[r] for r in range(n_rois)]
 
-                row = [str(ptid), str(v)]
-                for r in range(n_rois):
-                    row += ['%.6f' % rp[r],
-                            '%.6f' % mp[r],
-                            '%.6f' % gt[r]]
-
-                fh.write(','.join(row) + '\n')
-                n_rows += 1
+                for model_name, preds in (('RNN', rnn_preds), ('MLP', mlp_preds)):
+                    pred_vals = ['%.6f' % preds[v][r] for r in range(n_rois)]
+                    row = [str(ptid), str(v), model_name] + pred_vals + real_vals
+                    fh.write(','.join(row) + '\n')
+                    n_rows += 1
 
     return n_rows
 
