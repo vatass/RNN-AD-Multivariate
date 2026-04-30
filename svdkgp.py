@@ -548,7 +548,7 @@ def main():
     parser = argparse.ArgumentParser(description='Multi-output GP Regression and Classification for Neurodegeneration Prediction')
     # Data Parameters
     parser.add_argument("--experimentID", help="Indicates the Experiment Identifier", default='adniblsa')
-    parser.add_argument("--file", help="Identifier for the data", default="subjectsamples_longclean_mmse_dlmuse_allstudies")
+    parser.add_argument("--file", help="Identifier for the data", default="subjectsamples_longclean_dl_muse_allstudies")
     parser.add_argument("--folder", type=int, default=2)
     parser.add_argument("--sigma", type=float, nargs="+", default=None, help="Per-task monotonic direction. 1 for decreasing, -1 for increasing")
     parser.add_argument("--lambda_val", type=float, default=0.0, help="Monotonic penalty, all tasks are trained with the same penalty")
@@ -572,14 +572,14 @@ def main():
 
     if heldout == -1:
         print("Loading all studies...")
-        with (open("/home/cbica/Desktop/DKGP/data/train_subject_allstudies_ids_dl_hmuse" + str(fold) +  ".pkl", "rb")) as openfile:
+        with (open("train_subject_allstudies_ids_dl_hmuse" + str(fold) +  ".pkl", "rb")) as openfile:
             while True:
                 try:
                     train_ids.append(pickle.load(openfile))
                 except EOFError:
                     break 
 
-        with (open("/home/cbica/Desktop/DKGP/data/test_subject_allstudies_ids_dl_hmuse" + str(fold) +  ".pkl", "rb")) as openfile:
+        with (open("test_subject_allstudies_ids_dl_hmuse" + str(fold) +  ".pkl", "rb")) as openfile:
             while True:
                 try:
                     test_ids.append(pickle.load(openfile))
