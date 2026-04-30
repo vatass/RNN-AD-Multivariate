@@ -48,7 +48,6 @@ parser.add_argument("--roi_idx", type=int, default=17)
 parser.add_argument("--personalization", type=str, default=False)
 parser.add_argument("--history", type=int, default=4)
 parser.add_argument("--pers_lr", type=float, help='Pers LR', default=0.01844) # 0.3510
-parser.add_argument("--folder", type=int, default=1)
 ####
 # Feature Representation 
 # H_MUSE features
@@ -97,9 +96,8 @@ if personalization:
 # wandb.config = args
 mae_MTGP_list, coverage_MTGP_list, interval_MTGP_list = [], [], [] 
 
-folder = int(args.folder)
 datasamples = pd.read_csv('./subjectsamples_longclean_dl_muse_allstudies.csv')
-longitudinal_covariates = pd.read_csv("longitudinal_covariates_allstudies.csv")
+longitudinal_covariates = pd.read_csv("../LongitudinalDiffusion/longitudinal_covariates_allstudies.csv")
 subject_ids = list(datasamples['PTID'].unique()) 
 
 # wandb.config['Subjects'] = len(subject_ids) 
@@ -148,11 +146,6 @@ for fold in range(5):
     test_x = datasamples[datasamples['PTID'].isin(test_ids)]['X']
     test_y = datasamples[datasamples['PTID'].isin(test_ids)]['Y']
 
-    covariates_train = covariatesdf[covariatesdf['PTID'].isin(train_ids)]
-    covariates_test = covariatesdf[covariatesdf['PTID'].isin(test_ids)]
-
-    print('Covariates Test', covariates_test.shape)
-    print('Covariates Train', covariates_train.shape)
     
     corresponding_test_ids = datasamples[datasamples['PTID'].isin(test_ids)]['PTID'].to_list()
     corresponding_train_ids = datasamples[datasamples['PTID'].isin(train_ids)]['PTID'].to_list() 
