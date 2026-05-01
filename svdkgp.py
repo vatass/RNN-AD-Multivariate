@@ -364,7 +364,7 @@ def select_inducing_points(train_x, train_subject_ids, selected_subject_ids=None
 
     return inducing_points
 
-def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mode: int):
+def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mode: int, idxs):
     f = open('/home/cbica/Desktop/LongGPClustering/roi_to_idx.json')
     roi_to_idx = json.load(f)
 
@@ -389,7 +389,7 @@ def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mod
     test_x  = test_x.numpy()
     test_y  = test_y.numpy()   # (n_test, 145)
 
-    region_name, idxs, task_names = get_region_y_indices_and_names(mode, roi_to_idx)
+    # region_name, idxs, task_names = get_region_y_indices_and_names(mode, roi_to_idx)
     train_y_region = train_y[:, idxs]
     test_y_region = test_y[:, idxs]
 
@@ -557,6 +557,8 @@ def main():
     parser.add_argument("--points", type=int, default=3, help="Points per subject")
     parser.add_argument("--epochs", type=int, default=30, help="Epochs for pre-training")
     parser.add_argument("--heldout", type=int, default=-1, help="Type of heldout study")
+    parser.add_argument("--index", type=int, default=-1, help="Index of Single Biomarker")
+
     args = parser.parse_args()
     expID = args.experimentID
     file = args.file
@@ -615,7 +617,8 @@ def main():
         file=file,
         train_ids=train_ids,
         test_ids=test_ids,
-        mode=mode
+        mode=mode, 
+        idxs=idx
     )
     temporal_index = -1
 
@@ -647,8 +650,10 @@ def main():
     #Define monotonicity hyper-parameters
     num_tasks = num_outputs
     if mode == 2:
+        # -1 is for increasing.
         sigma = torch.tensor([-1] * num_outputs, dtype=torch.float64, device=device)
     else:
+        # 1 is for decreasing.
         sigma = torch.tensor([1] * num_outputs, dtype=torch.float64, device=device)
 
     lambda_penalty = torch.tensor([lambda_val] * num_outputs, dtype=torch.float64, device=device)

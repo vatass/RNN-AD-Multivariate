@@ -163,10 +163,6 @@ for fold in range(5):
         # val_x = val_x.cuda(gpu_id)
         # val_y = val_y.cuda(gpu_id)
 
-    ## Save the whole Data 
-    torch.save(train_x, 'train_x_data_fold_' + str(fold) + '.pt')
-    torch.save(train_x, 'train_y_data_fold_' + str(fold) + '.pt')
-
     print('Train Data', train_x.shape)
     print('Targets', train_y.shape)
     print('Test Data', test_x.shape)
