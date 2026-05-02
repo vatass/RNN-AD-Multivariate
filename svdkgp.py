@@ -58,6 +58,7 @@ REGION_ROIS = OrderedDict({
         "MUSE_Volume_192", "MUSE_Volume_193", "MUSE_Volume_204", "MUSE_Volume_205"
     ])
 })
+
 def set_seed(seed: int = 42):
     import random
     import numpy as np
@@ -370,7 +371,7 @@ def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mod
 
     index_to_roi = {v: k for k, v in roi_to_idx.items()}
  
-    datasamples = pd.read_csv('/home/cbica/Desktop/DKGP/data/subjectsamples_longclean_dl_muse_allstudies.csv')
+    datasamples = pd.read_csv(file )
 
     train_x = datasamples[datasamples['PTID'].isin(train_ids)]['X']
     train_y = datasamples[datasamples['PTID'].isin(train_ids)]['Y']
@@ -381,7 +382,7 @@ def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mod
     corresponding_test_ids  = datasamples[datasamples['PTID'].isin(test_ids)]['PTID'].tolist()
 
     train_x, train_y, test_x, test_y = process_temporal_singletask_data(
-        train_x=train_x, train_y=train_y, test_x=test_x, test_y=test_y, test_ids=test_ids
+        train_x=train_x, train_y=train_y, test_x=test_x, test_y=test_y
     )
 
     train_x = train_x.numpy()
@@ -393,6 +394,8 @@ def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mod
     train_y_region = train_y[:, idxs]
     test_y_region = test_y[:, idxs]
 
+    num_outputs = 1
+
     print("NaNs per task:", np.isnan(train_y_region).sum(axis=0))
     print("std per task:", train_y_region.std(axis=0))
     print("mix/max per task:", train_y_region.min(axis=0), train_y_region.max(axis=0))
@@ -400,12 +403,10 @@ def load_and_preprocess_region_based_data(folder, file, train_ids, test_ids, mod
     y_mean = train_y_region.mean(axis=0, keepdims=True)
     y_std = train_y_region.std(axis=0, keepdims=True)
 
-    num_outputs = len(task_names)
-
     print("Shape of train_x:", train_x.shape)
     print("Shape of train_y:", train_y_region.shape)
 
-    return train_x, train_y_region, test_x, test_y_region,  corresponding_train_ids, corresponding_test_ids, num_outputs, task_names, region_name
+    return train_x, train_y_region, test_x, test_y_region,  corresponding_train_ids, corresponding_test_ids, num_outputs
 
 
 def collate_fn(batch):
@@ -459,68 +460,53 @@ def save_subject_trajectory_plots(
     y_true_np,
     y_pred_np,
     y_var_np,
-    task_dirs,
-    task_names=None,
     dpi=300,
     save_csv=True
     ):
-
-    order = np.argsort(t_np)
-    t = t_np[order]
-    y_true = y_true_np[order, :]
-    y_pred = y_pred_np[order, :]
-    y_var = y_var_np[order, :] if y_var_np is not None else None
-
-    subj_safe = _safe_filename(subject_id)
-    num_tasks = y_true.shape[1]
-
+    num_tasks = 1
     for k in range(num_tasks):
-        fig = plt.figure(figsize=(7,4))
+        # fig = plt.figure(figsize=(7,4))
 
-        plt.plot(t, y_true[:, k], marker='o', linewidth=2, label="Ground Truth")
+        # plt.plot(t, y_true[:, k], marker='o', linewidth=2, label="Ground Truth")
 
-        plt.plot(t, y_pred[:, k], marker='x', linestyle="--", linewidth=2, label="Predicted Trajectory")
+        # plt.plot(t, y_pred[:, k], marker='x', linestyle="--", linewidth=2, label="Predicted Trajectory")
 
-        #Uncertainty 
+        # #Uncertainty 
         y_std = None
         y_lower = None
         y_upper = None
-        if y_var is not None:
-            y_std = np.sqrt(np.maximum(y_var[:, k], 0.0))
-            y_lower = y_pred[:, k] - 2.0 * y_std
-            y_upper = y_pred[:, k] + 2.0 * y_std
-            plt.fill_between(t, y_lower, y_upper, alpha=0.2)
+        if y_var_np is not None:
+            y_std = np.sqrt(np.maximum(y_var_np[:, k], 0.0))
+            y_lower = y_pred_np - 2.0 * y_std
+            y_upper = y_pred_np + 2.0 * y_std
 
-        task_label = (task_names[k] if task_names is not None else f"Task {k+1}")
-        plt.title(f"Subject {subject_id} | {task_label}")
-        plt.xlabel("Time")
-        plt.ylabel("Value")
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
+        # task_label = (task_names[k] if task_names is not None else f"Task {k+1}")
+        # plt.title(f"Subject {subject_id} | {task_label}")
+        # plt.xlabel("Time")
+        # plt.ylabel("Value")
+        # plt.grid(True, alpha=0.3)
+        # plt.legend()
+        # plt.tight_layout()
 
-        #Save
-        out_png = os.path.join(task_dirs[k], f"{subj_safe}_task{k+1}_csv")
-        fig.savefig(out_png, dpi=dpi)
-        plt.close(fig)
+        # #Save
+        # out_png = os.path.join(task_dirs[k], f"{subj_safe}_task{k+1}_csv")
+        # fig.savefig(out_png, dpi=dpi)
+        # plt.close(fig)
+
+        
 
         if save_csv:
-            out_csv = os.path.join(task_dirs[k], f"{subj_safe}_task{k+1}.csv")
-            if y_std is None:
-                df = pd.DataFrame({
-                    "time": t,
-                    "y_true": y_true[:, k],
-                    "y_pred": y_pred[:, k],
-                })
-            else:
-                df = pd.DataFrame({
-                    "time": t,
-                    "y_true": y_true[:, k],
-                    "y_pred": y_pred[:, k],
-                    "y_std": y_std,
-                    "y_lower_2std": y_lower,
-                    "y_upper_2std": y_upper,
-                })
+            out_csv = os.path.join('./results/svdkgp/trajectry_subject_' + str(subject_id) +'.csv')
+            print(len(t_np.tolist()))
+            print(len(y_true_np.tolist()))
+            print(len(y_pred_np[0].tolist()))     
+            assert len(t_np.tolist()) == len(y_true_np.tolist()) == len(y_pred_np.tolist())
+
+            df = pd.DataFrame({
+                "time": t_np.tolist(),
+                "y_true": y_true_np.tolist(),
+                "y_pred": y_pred_np.tolist(),
+            })         
             df.to_csv(out_csv, index=False)
 
 # Added metrics
@@ -555,7 +541,7 @@ def main():
     parser.add_argument("--mode", type=int, default=0, help="Mode for brain region training")
     parser.add_argument("--hidden_dim", type=int, default=64, help="Hidden dimension for network")
     parser.add_argument("--points", type=int, default=3, help="Points per subject")
-    parser.add_argument("--epochs", type=int, default=30, help="Epochs for pre-training")
+    parser.add_argument("--epochs", type=int, default=1, help="Epochs for pre-training") # 30 
     parser.add_argument("--heldout", type=int, default=-1, help="Type of heldout study")
     parser.add_argument("--index", type=int, default=-1, help="Index of Single Biomarker")
 
@@ -565,6 +551,7 @@ def main():
     folder = args.folder
     lambda_val = args.lambda_val
     mode = args.mode
+    idx = args.index
     heldout = args.heldout
 
     # Load train and test IDs
@@ -612,7 +599,7 @@ def main():
     # Load and preprocess data
     train_x, train_y, test_x, test_y, \
     corresponding_train_ids, corresponding_test_ids, \
-    num_outputs, task_names, region_name = load_and_preprocess_region_based_data(
+    num_outputs = load_and_preprocess_region_based_data(
         folder=folder,
         file=file,
         train_ids=train_ids,
@@ -642,7 +629,6 @@ def main():
     train_y = torch.tensor(train_y, dtype=torch.float64)
     test_x = torch.tensor(test_x, dtype=torch.float64)
     test_y = torch.tensor(test_y, dtype=torch.float64)
-
 
     print("Train x shape :", train_x.shape)
     print("Train y shape :", train_y.shape)
@@ -690,6 +676,7 @@ def main():
     # Training loop for deep regression model
     num_epochs = args.epochs # Adjust as needed
     total_regression_loss = [] 
+    num_epochs = 30
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
@@ -708,15 +695,15 @@ def main():
         print(f"Epoch {epoch+1}/{num_epochs}, Regression Loss: {epoch_loss:.4f}")
 
     # Save the feature extractor
-    output_file = "./multitask_trials"
+    output_file = "./results/svdkgp/trials"
 
-    os.makedirs(output_file, exist_ok=True)
-    print(f"Output directory {output_file} created")
+    # os.makedirs(output_file, exist_ok=True)
+    # print(f"Output directory {output_file} created")
 
-    MAX_SUBJECT_PLOTS_PER_TASK = 20
-    plots_saved_per_task = [0] * num_outputs
-    plots_root = os.path.join(output_file, f"test_trajectories_mode{mode}_{lambda_val}_{region_name.replace(' ', '_')}")
-    task_plots_dirs = _ensure_task_plot_dirs(plots_root, num_outputs)
+    # MAX_SUBJECT_PLOTS_PER_TASK = 20
+    # plots_saved_per_task = [0] * num_outputs
+    # plots_root = os.path.join(output_file, f"test_trajectories_mode{mode}_{lambda_val}_{region_name.replace(' ', '_')}")
+    # task_plots_dirs = _ensure_task_plot_dirs(plots_root, num_outputs)
 
     from pathlib import Path
     monotonicity_results = Path(f"{output_file}/results.txt")
@@ -885,6 +872,10 @@ def main():
             targets = targets.to(device, non_blocking=True)
             subject_id = subject_ids[0]
 
+            print(inputs.shape, targets.shape)
+            print(subject_id)
+            print(len(subject_ids))
+
             # Regression Predictions
             gp_regression_output = model_wrapper(inputs)    
             pred_regression = regression_likelihood(gp_regression_output)
@@ -897,38 +888,14 @@ def main():
             t_np = inputs[:, -1].detach().cpu().numpy()
             y_true_np = targets.detach().cpu().numpy()
 
-            can_plot_any = (MAX_SUBJECT_PLOTS_PER_TASK is None) or any(
-                plots_saved_per_task[k] < MAX_SUBJECT_PLOTS_PER_TASK for k in range(num_outputs)
+            save_subject_trajectory_plots(
+                subject_id=subject_id,
+                t_np=t_np,
+                y_true_np=y_true_np,
+                y_pred_np=mean_np,
+                y_var_np=var_np,
+
             )
-
-            if can_plot_any:
-                if MAX_SUBJECT_PLOTS_PER_TASK is None:
-                    save_subject_trajectory_plots(
-                        subject_id=subject_id,
-                        t_np=t_np,
-                        y_true_np=y_true_np,
-                        y_pred_np=mean_np,
-                        y_var_np=var_np,
-                        task_dirs=task_plots_dirs,
-                        task_names=task_names
-                    )
-
-                    for k in range(num_outputs):
-                        plots_saved_per_task[k]+=1
-
-                else:
-                    save_subject_trajectory_plots(
-                        subject_id=subject_id,
-                        t_np=t_np,
-                        y_true_np=y_true_np,
-                        y_pred_np=mean_np,
-                        y_var_np=var_np,
-                        task_dirs=task_plots_dirs,
-                        task_names=task_names
-                    )
-                    for k in range(num_outputs):
-                        if plots_saved_per_task[k] < MAX_SUBJECT_PLOTS_PER_TASK:
-                            plots_saved_per_task[k]+=1
 
             for i in range(num_outputs):
                 regression_predictions[i].extend(mean_pred[:, i].cpu().numpy())
@@ -979,7 +946,7 @@ def main():
         regression_actuals, regression_predictions
     )
 
-    output_file = "./multitask_trials"
+    output_file = "./results/svdkp/trials"
     from pathlib import Path
     monotonicity_results = Path(f"{output_file}/results.txt")
     monotonicity_results.touch(exist_ok=True)
@@ -1011,18 +978,18 @@ def main():
     print(f"\nMean Test MSE (avg across tasks): {mse_mean:.4f}")
     print(f"Mean Test MAE (avg across tasks): {mae_mean:.4f}")
 
-    # Optionally, save the models
-    save_file = "./multitask_trials/ckpts/"
-    os.makedirs(save_file, exist_ok=True)
-    torch.save(
-        gp_regression_model.state_dict(),
-        save_file + 'gp_regression_model_{}_{}.pth'.format(mode, lambda_val)
-    )
+    # # Optionally, save the models
+    # save_file = "./trials/ckpts/"
+    # os.makedirs(save_file, exist_ok=True)
+    # torch.save(
+    #     gp_regression_model.state_dict(),
+    #     save_file + 'gp_regression_model_{}_{}.pth'.format(mode, lambda_val)
+    # )
 
-    torch.save(
-        regression_likelihood.state_dict(),
-        save_file + 'regression_likelihood_{}_{}.pth'.format(mode, lambda_val)
-    )
+    # torch.save(
+    #     regression_likelihood.state_dict(),
+    #     save_file + 'regression_likelihood_{}_{}.pth'.format(mode, lambda_val)
+    # )
 
 if __name__ == "__main__":
     main()
