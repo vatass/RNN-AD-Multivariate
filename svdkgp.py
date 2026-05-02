@@ -10,7 +10,7 @@ import pandas as pd
 import gpytorch
 from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
-from functions import process_temporal_singletask_data
+from functions import process_temporal_singletask_data, mae, mse, R2, calc_coverage, calculate_errors
 import json
 import pickle
 import argparse
@@ -839,6 +839,11 @@ def main():
             #f"LR: {scheduler.get_last_lr()[0]:.2e}"
         )
 
+    # Result containers (mirrors dkgp.py structure)
+    population_results = {'id': [], 'kfold': [], 'score': [], 'upper': [], 'lower': [], 'variance': [], 'y': [], 'time': []}
+    population_mae_kfold = {'kfold': [], 'mae': [], 'mse': [], 'rmse': [], 'R2': [], 'interval': [], 'coverage': []}
+    population_metrics_per_subject = {'kfold': [], 'id': [], 'mae_per_subject': [], 'wes_per_subject': [], 'interval': [], 'coverage': []}
+
     # Evaluation
     def is_monotonic(sequence, sig):
         seq = np.asarray(sequence)
@@ -860,6 +865,7 @@ def main():
         all_vars = []
         all_trues = []
         all_subjects = []
+        all_times = []
 
         mono_subject_ok = [0] * num_outputs
         mono_subject_total = 0
@@ -905,6 +911,7 @@ def main():
             all_vars.append(var_pred.detach().cpu().numpy())
             all_trues.append(targets.detach().cpu().numpy())
             all_subjects.append(subject_ids)
+            all_times.append(t_np.tolist())
 
             #Check monotnicity
             t = inputs[:, -1].detach().cpu().numpy()
@@ -937,6 +944,82 @@ def main():
     Y_mean = np.vstack(all_means)
     Y_var = np.vstack(all_vars)
     Y_true = np.vstack(all_trues)
+
+    # Flatten subject IDs and times across all test batches
+    all_subjects_flat = [sid for batch in all_subjects for sid in batch]
+    all_times_flat = [t for batch in all_times for t in batch]
+
+    # Compute upper/lower bounds (z=1.96, matches dkgp.py confidence_region convention)
+    Y_std = np.sqrt(np.maximum(Y_var, 1e-9))
+    Y_upper = Y_mean + 1.96 * Y_std
+    Y_lower = Y_mean - 1.96 * Y_std
+
+    # Flatten to 1-D for single-output case
+    pred_flat = Y_mean[:, 0]
+    true_flat = Y_true[:, 0]
+    upper_flat = Y_upper[:, 0]
+    lower_flat = Y_lower[:, 0]
+    var_flat = Y_var[:, 0]
+
+    inverse_width = 1.0 / (upper_flat - lower_flat + 1e-9)
+    upper_tensor_ps = torch.tensor(upper_flat, dtype=torch.float64)
+    lower_tensor_ps = torch.tensor(lower_flat, dtype=torch.float64)
+    true_tensor_ps = torch.tensor(true_flat, dtype=torch.float64)
+
+    mae_ps, wmae_ps, interval_ps, coverage_ps = calculate_errors(
+        predictions=pred_flat,
+        upper_tensor=upper_tensor_ps,
+        lower_tensor=lower_tensor_ps,
+        ids=all_subjects_flat,
+        real_values=true_flat,
+        real_tensor=true_tensor_ps,
+        weights=inverse_width.tolist()
+    )
+
+    # Aggregate population metrics for this fold
+    mae_val, _ = mae(true_flat, pred_flat)
+    mse_val, rmse_val, _ = mse(true_flat, pred_flat)
+    r2_val = R2(true_flat, pred_flat)
+    _, _, mean_coverage_val, mean_interval_val = calc_coverage(
+        predictions=pred_flat,
+        groundtruth=true_flat,
+        intervals=[lower_flat, upper_flat]
+    )
+
+    population_results['id'].extend(all_subjects_flat)
+    population_results['kfold'].extend([fold] * len(all_subjects_flat))
+    population_results['score'].extend(pred_flat.tolist())
+    population_results['upper'].extend(upper_flat.tolist())
+    population_results['lower'].extend(lower_flat.tolist())
+    population_results['variance'].extend(var_flat.tolist())
+    population_results['y'].extend(true_flat.tolist())
+    population_results['time'].extend(all_times_flat)
+
+    population_mae_kfold['kfold'].append(fold)
+    population_mae_kfold['mae'].append(float(mae_val))
+    population_mae_kfold['mse'].append(float(mse_val))
+    population_mae_kfold['rmse'].append(float(rmse_val))
+    population_mae_kfold['R2'].append(float(r2_val))
+    population_mae_kfold['interval'].append(float(mean_interval_val))
+    population_mae_kfold['coverage'].append(float(mean_coverage_val))
+
+    for key in mae_ps:
+        population_metrics_per_subject['kfold'].append(fold)
+        population_metrics_per_subject['id'].append(key)
+        population_metrics_per_subject['mae_per_subject'].append(mae_ps[key])
+        population_metrics_per_subject['wes_per_subject'].append(wmae_ps[key])
+        population_metrics_per_subject['interval'].append(interval_ps[key])
+        population_metrics_per_subject['coverage'].append(coverage_ps[key])
+
+    # Save CSVs (mirrors dkgp.py output structure)
+    task_label = 'MUSE_' + str(idx)
+    os.makedirs('./results/svdkgp', exist_ok=True)
+    pd.DataFrame(population_mae_kfold).to_csv(
+        './results/svdkgp/singletask_unharmonized_dlmuse_' + task_label + '_svdkgp_mae_kfold_' + expID + '.csv')
+    pd.DataFrame(population_results).to_csv(
+        './results/svdkgp/singletask_unharmonized_dlmuse' + task_label + '_svdkgp_population_' + expID + '.csv')
+    pd.DataFrame(population_metrics_per_subject).to_csv(
+        './results/svdkgp/singletask_unharmonized_dlmuse_' + task_label + '_svdkgp_mae_per_subject_kfold_' + expID + '.csv')
 
     nll_per_task, nll_mean = gaussian_nll_per_task(Y_true, Y_mean, Y_var)
 
